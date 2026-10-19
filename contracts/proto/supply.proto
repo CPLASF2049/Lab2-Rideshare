@@ -1,0 +1,206 @@
+// 运力（司机）与位置服务内部接口（rideshare.supply.v1）
+// 职责：
+//   DriverService   —— 司机档案、资质、在线状态与接单资格（低频、强校验）
+//   LocationService —— 最新位置查询、邻近司机查询、轨迹回放（高频、可覆盖/只追加）
+// 位置写入不走本接口：司机端经 WebSocket 上报 -> Kafka location.reported.v1 -> 本服务消费落库。
+syntax = "proto3";
+
+package rideshare.supply.v1;
+
+option java_multiple_files = true;
+option java_package = "com.rideshare.supply.v1";
+option go_package = "github.com/rideshare/contracts/gen/go/supply/v1;supplyv1";
+
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+// 在线状态：业务资格状态，与位置新鲜度无关
+enum OnlineStatus {
+  ONLINE_STATUS_UNSPECIFIED = 0;
+  OFFLINE = 1;
+  ONLINE = 2;
+  BUSY = 3;
+}
+
+enum QualificationType {
+  QUALIFICATION_TYPE_UNSPECIFIED = 0;
+  DRIVER_LICENSE = 1;   // 网络预约出租汽车驾驶员证（人证）
+  VEHICLE_CERT = 2;     // 网络预约出租汽车运输证（车证）
+}
+
+enum AuditStatus {
+  AUDIT_STATUS_UNSPECIFIED = 0;
+  AUDIT_PENDING = 1;
+  AUDIT_APPROVED = 2;
+  AUDIT_REJECTED = 3;
+  AUDIT_EXPIRED = 4;
+}
+
+service DriverService {
+  // 查询司机档案（含资质与车辆）
+  rpc GetDriver(GetDriverRequest) returns (GetDriverResponse);
+
+  // 批量校验接单资格：在线 ∧ 资质有效 ∧ 无进行中行程 ∧ 同城 ∧ 无冷却
+  rpc BatchCheckEligibility(BatchCheckEligibilityRequest) returns (BatchCheckEligibilityResponse);
+
+  // 接单后置忙（幂等；失败由 trip.matched.v1 事件兜底）
+  rpc SetDriverBusy(SetDriverBusyRequest) returns (SetDriverBusyResponse);
+
+  // 取消/结束/支付后置闲
+  rpc SetDriverFree(SetDriverFreeRequest) returns (SetDriverFreeResponse);
+
+  // 司机主动上下线
+  rpc UpdateOnlineStatus(UpdateOnlineStatusRequest) returns (UpdateOnlineStatusResponse);
+}
+
+service LocationService {
+  // 邻近司机查询：Redis GEO，P99 < 30 ms
+  rpc FindNearbyDrivers(FindNearbyDriversRequest) returns (FindNearbyDriversResponse);
+
+  // 最新位置：超过 30 秒标记 stale
+  rpc GetLatestLocation(GetLatestLocationRequest) returns (GetLatestLocationResponse);
+
+  // 轨迹回放（运营/计费校验）
+  rpc GetTrack(GetTrackRequest) returns (GetTrackResponse);
+}
+
+// ---------------------------------------------------------------- 司机
+
+message Vehicle {
+  string vehicle_id = 1;
+  string driver_id = 2;
+  string plate_no = 3;
+  string model = 4;
+  int32 seats = 5;
+  AuditStatus audit_status = 6;
+}
+
+message Qualification {
+  QualificationType type = 1;
+  string cert_no_masked = 2;
+  google.protobuf.Timestamp expire_at = 3;
+  AuditStatus audit_status = 4;
+}
+
+message Driver {
+  string driver_id = 1;
+  string account_id = 2;
+  string real_name_masked = 3;
+  string service_city = 4;          // SH / HZ / NJ
+  OnlineStatus online_status = 5;
+  bool dispatch_eligible = 6;
+  string current_trip_id = 7;       // 非空表示进行中
+  double rating = 8;
+  double accept_rate = 9;
+  repeated Qualification qualifications = 10;
+  Vehicle vehicle = 11;
+  google.protobuf.Timestamp updated_at = 12;
+}
+
+message GetDriverRequest {
+  string driver_id = 1;
+}
+
+message GetDriverResponse {
+  Driver driver = 1;
+}
+
+message BatchCheckEligibilityRequest {
+  repeated string driver_ids = 1;   // 最多 50 个
+  string city_code = 2;
+}
+
+message Eligibility {
+  string driver_id = 1;
+  bool eligible = 2;
+  string reason = 3;                // OFFLINE / BUSY / QUALIFICATION_EXPIRED / IN_TRIP / NO_VEHICLE
+}
+
+message BatchCheckEligibilityResponse {
+  repeated Eligibility results = 1;
+}
+
+message SetDriverBusyRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string driver_id = 2;
+  string trip_id = 3;
+}
+
+message SetDriverBusyResponse {
+  OnlineStatus online_status = 1;
+  bool idempotent_replay = 2;
+}
+
+message SetDriverFreeRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string driver_id = 2;
+  string trip_id = 3;
+}
+
+message SetDriverFreeResponse {
+  OnlineStatus online_status = 1;
+  bool idempotent_replay = 2;
+}
+
+message UpdateOnlineStatusRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string driver_id = 2;
+  OnlineStatus target = 3;          // ONLINE / OFFLINE
+  string service_city = 4;
+}
+
+message UpdateOnlineStatusResponse {
+  Driver driver = 1;
+}
+
+// ---------------------------------------------------------------- 位置
+
+message NearbyDriver {
+  string driver_id = 1;
+  string city_code = 2;
+  int32 distance_m = 3;
+  double heading = 4;
+  google.protobuf.Timestamp reported_at = 5;
+  bool fresh = 6;                   // reported_at 距今 <= 30 秒
+}
+
+message FindNearbyDriversRequest {
+  rideshare.common.v1.GeoPoint center = 1;
+  string city_code = 2;
+  int32 radius_m = 3;               // 上限 5000（R-04）
+  int32 limit = 4;                  // 默认 20，最大 50
+}
+
+message FindNearbyDriversResponse {
+  repeated NearbyDriver drivers = 1;
+  int32 searched_radius_m = 2;
+  bool geo_index_available = 3;     // false 表示降级（候选快照/告警）
+}
+
+message GetLatestLocationRequest {
+  string driver_id = 1;
+}
+
+message GetLatestLocationResponse {
+  NearbyDriver location = 1;
+}
+
+message TrackPoint {
+  int32 seq = 1;
+  double lat = 2;
+  double lng = 3;
+  double speed = 4;
+  google.protobuf.Timestamp reported_at = 5;
+}
+
+message GetTrackRequest {
+  string trip_id = 1;
+  rideshare.common.v1.PageRequest page = 2;
+}
+
+message GetTrackResponse {
+  string track_id = 1;
+  string trip_id = 2;
+  repeated TrackPoint points = 3;
+  rideshare.common.v1.PageResponse page = 4;
+}

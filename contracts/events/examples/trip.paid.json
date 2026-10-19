@@ -1,0 +1,18 @@
+{
+  "event_id": "evt_01J9Z5F5KL8M1N3P",
+  "event_type": "trip.paid.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T09:00:13+08:00",
+  "producer": "trip-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "6f1d9a2c3b4e5f60718293a4b5c6d7e8",
+  "payload": {
+    "trip_id": "t_20261015_51bd",
+    "rider_id": "a_1002381",
+    "driver_id": "d_77120",
+    "fare_id": "f_20261015_4a17",
+    "payment_id": "p_20261015_2f80",
+    "paid_at": "2026-10-15T09:00:13+08:00"
+  }
+}

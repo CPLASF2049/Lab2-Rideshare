@@ -1,0 +1,868 @@
+openapi: 3.0.3
+
+info:
+  title: 网约车平台 · 乘客端接口（Rider API）
+  version: 1.0.0
+  description: |
+    面向乘客 App / H5 / 小程序的 REST 接口，经 `api-gateway` 统一暴露。
+    约定：
+    - 鉴权：`Authorization: Bearer <JWT>`，角色必须包含 `RIDER`。
+    - 版本：路径前缀 `/v1`；破坏性变更升版本。
+    - 幂等：所有 POST 写接口支持 `Idempotency-Key`（24 小时窗口，键 + 请求体指纹）。
+    - 错误：统一错误体 `Error`，`code` 取值见报告 §4.5.1 错误码表。
+    - 金额：字符串定点，避免浮点误差；坐标为 WGS84。
+
+servers:
+  - url: https://api.rideshare.example.com
+    description: 生产环境（按城市就近接入：sh / hz / nj）
+
+tags:
+  - name: Quote
+    description: 报价（pricing-service）
+  - name: Trip
+    description: 行程、进度、取消与重新叫车（trip-service）
+  - name: Bill
+    description: 账单与支付（payment-service）
+  - name: Realtime
+    description: 实时推送连接票据（realtime-gateway）
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/quotes:
+    post:
+      tags: [Quote]
+      summary: 获取报价
+      operationId: createQuote
+      description: |
+        根据起终点与城市生成报价快照。同一 OD 路线 60 秒缓存；地图服务超时 500 ms 时降级为
+        直线距离 × 1.4 估算并标记 `degraded=true`。报价有效期 5 分钟（规则 R-01）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateQuoteRequest'
+      responses:
+        '200':
+          description: 报价成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quote'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Degraded'
+
+  /v1/quotes/{quote_id}:
+    get:
+      tags: [Quote]
+      summary: 查询报价
+      operationId: getQuote
+      parameters:
+        - $ref: '#/components/parameters/QuoteId'
+      responses:
+        '200':
+          description: 报价快照
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quote'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: 报价已过期（QUOTE_EXPIRED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/trips:
+    post:
+      tags: [Trip]
+      summary: 发起叫车
+      operationId: createTrip
+      description: |
+        用有效报价创建行程，落库为 `REQUESTED` 并发布 `trip.requested.v1` 触发撮合。
+        前置校验：报价未过期、乘客无未结清欠费（`UNPAID_BILL_EXISTS`）。
+        幂等：同一 `Idempotency-Key` 24 小时内返回同一 `trip_id`。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTripRequest'
+      responses:
+        '201':
+          description: 行程已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trip'
+        '200':
+          description: 幂等命中，返回既有行程
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trip'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          description: 报价已过期（QUOTE_EXPIRED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/trips/{trip_id}:
+    get:
+      tags: [Trip]
+      summary: 查询行程
+      operationId: getTrip
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      responses:
+        '200':
+          description: 行程详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trip'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/trips/{trip_id}/progress:
+    get:
+      tags: [Trip]
+      summary: 查询行程进度
+      operationId: getTripProgress
+      description: |
+        面客进度视图：状态、车辆最新位置、ETA 与关键时间点。建立 WebSocket 推送前作为首帧基准。
+        位置服务不可用时 `driver_location` 返回最后已知值并带 `location_fresh=false`。
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      responses:
+        '200':
+          description: 进度
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripProgress'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/trips/{trip_id}/cancellations:
+    post:
+      tags: [Trip]
+      summary: 申请取消
+      operationId: requestCancellation
+      description: |
+        受理取消申请（**业务结果异步**）：立即返回 `202` + `cancellation_id`，
+        取消费用由 `pricing-service` 判责计算后通过 `trip.cancellation.accepted.v1` 与 WebSocket 推送结果。
+        阶段判定：`BEFORE_ACCEPT`/`AFTER_ACCEPT`/`AFTER_ARRIVAL` 可自助取消；
+        `AFTER_RIDING` 返回 `409 OPS_INTERVENE_REQUIRED`（规则 R-08）。
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancellationRequest'
+      responses:
+        '202':
+          description: 取消申请已受理
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cancellation'
+        '200':
+          description: 幂等命中，返回既有取消申请
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cancellation'
+        '409':
+          description: 当前状态不允许取消（TRIP_STATE_CONFLICT / OPS_INTERVENE_REQUIRED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/trips/{trip_id}/cancellation:
+    get:
+      tags: [Trip]
+      summary: 查询取消结果
+      operationId: getCancellation
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      responses:
+        '200':
+          description: 取消申请与判责结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cancellation'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/trips/{trip_id}/rebook:
+    post:
+      tags: [Trip]
+      summary: 重新叫车
+      operationId: rebookTrip
+      description: |
+        复用原行程的起终点与城市，**重新报价**后创建新行程，并通过 `rebook_from_trip_id` 关联旧行程。
+        原行程必须已终态（`CANCELLED`/`EXPIRED`），否则返回 `409 TRIP_NOT_TERMINATED`。
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: 新行程已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trip'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/trips/{trip_id}/bill:
+    get:
+      tags: [Bill]
+      summary: 查询行程账单
+      operationId: getTripBill
+      description: 返回该行程的账单（含行程费与取消费），由 `payment-service` 提供。
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      responses:
+        '200':
+          description: 账单
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bill'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/bills/{bill_id}/payments:
+    post:
+      tags: [Bill]
+      summary: 发起支付
+      operationId: createPayment
+      description: |
+        创建支付单并返回渠道支付参数用于唤起收银台。支付结果只能由渠道回调确认，
+        客户端应通过 `GET /v1/payments/{payment_id}` 或 WebSocket 推送获取最终状态。
+      parameters:
+        - $ref: '#/components/parameters/BillId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+      responses:
+        '200':
+          description: 支付单已创建（含唤醒收银台参数）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '402':
+          description: 支付失败（PAYMENT_FAILED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/payments/{payment_id}:
+    get:
+      tags: [Bill]
+      summary: 查询支付结果
+      operationId: getPayment
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^p_[0-9A-Za-z_]+$'
+      responses:
+        '200':
+          description: 支付单状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/realtime/ticket:
+    post:
+      tags: [Realtime]
+      summary: 换取 WebSocket 连接票据
+      operationId: createRealtimeTicket
+      description: |
+        返回带一次性票据的 WebSocket 地址（票据 60 秒有效）。连接建立后客户端按 `subscribe` 列表
+        接收推送；断线重连时携带 `last_seq` 请求补推（`GetMissedUpdates`）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscribe]
+              properties:
+                subscribe:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: object
+                    required: [subscribe_type, target_id]
+                    properties:
+                      subscribe_type:
+                        type: string
+                        enum: [TRIP_PROGRESS, DRIVER_LOCATION]
+                      target_id:
+                        type: string
+                        description: '`trip_id`（TRIP_PROGRESS）或 `driver_id`（DRIVER_LOCATION）'
+      responses:
+        '200':
+          description: 连接票据
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ws_url, ticket, expire_at]
+                properties:
+                  ws_url:
+                    type: string
+                    example: wss://rt-sh.rideshare.example.com/ws
+                  ticket:
+                    type: string
+                    description: 一次性票据，连接时以 `?ticket=` 传递
+                  expire_at:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    QuoteId:
+      name: quote_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^q_[0-9A-Za-z_]+$'
+    TripId:
+      name: trip_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^t_[0-9A-Za-z_]+$'
+    BillId:
+      name: bill_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^b_[0-9A-Za-z_]+$'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: 客户端生成的 UUID v4；相同键 + 相同请求体指纹在 24 小时内返回首次结果。
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: 参数错误（INVALID_ARGUMENT）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: 未认证（UNAUTHORIZED）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 无权访问（FORBIDDEN）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: 资源不存在（TRIP_NOT_FOUND / QUOTE_NOT_FOUND / BILL_NOT_FOUND）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: 状态冲突（TRIP_STATE_CONFLICT / UNPAID_BILL_EXISTS / TRIP_NOT_TERMINATED）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: 触发限流（RATE_LIMITED）
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: 建议重试等待秒数
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Degraded:
+      description: 依赖降级（SERVICE_DEGRADED），结果可能为估算值
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    GeoPoint:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          example: 31.2304
+        lng:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          example: 121.4737
+        address:
+          type: string
+          example: 上海市黄浦区南京东路 100 号
+
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: '^-?\d+\.\d{2}$'
+          example: '38.60'
+        currency:
+          type: string
+          enum: [CNY]
+          default: CNY
+
+    FareItem:
+      type: object
+      required: [item_type, amount]
+      properties:
+        item_type:
+          type: string
+          enum: [BASE, DISTANCE, TIME, WAITING, TOLL, SURGE, SERVICE_FEE, DISCOUNT, CANCEL_FEE, WAITING_TIMEOUT]
+        amount:
+          $ref: '#/components/schemas/Money'
+        description:
+          type: string
+          example: 里程费 8.4 公里 × 2.6 元/公里
+
+    CreateQuoteRequest:
+      type: object
+      required: [city_code, origin, dest]
+      properties:
+        city_code:
+          type: string
+          enum: [SH, HZ, NJ]
+        origin:
+          $ref: '#/components/schemas/GeoPoint'
+        dest:
+          $ref: '#/components/schemas/GeoPoint'
+
+    Quote:
+      type: object
+      required: [quote_id, rider_id, city_code, items, total_amount, surge_multiplier, expire_at]
+      properties:
+        quote_id:
+          type: string
+          example: q_20261015_8f3a
+        rider_id:
+          type: string
+          example: a_1002381
+        city_code:
+          type: string
+          enum: [SH, HZ, NJ]
+        origin:
+          $ref: '#/components/schemas/GeoPoint'
+        dest:
+          $ref: '#/components/schemas/GeoPoint'
+        est_distance_m:
+          type: integer
+          example: 8420
+        est_duration_s:
+          type: integer
+          example: 1680
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/FareItem'
+        total_amount:
+          $ref: '#/components/schemas/Money'
+        surge_multiplier:
+          type: number
+          format: double
+          minimum: 1.0
+          maximum: 2.5
+          example: 1.2
+        rule_version:
+          type: string
+          example: SH-2026-10-01
+        expire_at:
+          type: string
+          format: date-time
+        degraded:
+          type: boolean
+          description: 地图服务降级时为 true，里程为直线距离估算
+          default: false
+
+    CreateTripRequest:
+      type: object
+      required: [quote_id, payment_method]
+      properties:
+        quote_id:
+          type: string
+          example: q_20261015_8f3a
+        payment_method:
+          type: string
+          enum: [AUTO_DEBIT, WECHAT, ALIPAY, UNIONPAY]
+        remark:
+          type: string
+          maxLength: 100
+
+    Trip:
+      type: object
+      required: [trip_id, rider_id, city_code, status, created_at]
+      properties:
+        trip_id:
+          type: string
+          example: t_20261015_51bd
+        rider_id:
+          type: string
+        driver_id:
+          type: string
+          nullable: true
+        vehicle_id:
+          type: string
+          nullable: true
+        city_code:
+          type: string
+          enum: [SH, HZ, NJ]
+        status:
+          type: string
+          enum:
+            - REQUESTED
+            - DISPATCHING
+            - MATCHED
+            - DRIVER_EN_ROUTE
+            - DRIVER_ARRIVED
+            - RIDING
+            - ENDED
+            - PAID
+            - CANCELLING
+            - CANCELLED
+            - EXPIRED
+        quote_id:
+          type: string
+        fare_id:
+          type: string
+          nullable: true
+        payment_id:
+          type: string
+          nullable: true
+        rebook_from_trip_id:
+          type: string
+          nullable: true
+          description: 由"重新叫车"创建时指向被取消/过期的原行程
+        origin:
+          $ref: '#/components/schemas/GeoPoint'
+        dest:
+          $ref: '#/components/schemas/GeoPoint'
+        quote_total_amount:
+          $ref: '#/components/schemas/Money'
+        created_at:
+          type: string
+          format: date-time
+        matched_at:
+          type: string
+          format: date-time
+          nullable: true
+        arrived_at:
+          type: string
+          format: date-time
+          nullable: true
+        boarded_at:
+          type: string
+          format: date-time
+          nullable: true
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+        version:
+          type: integer
+          description: 乐观锁版本，客户端可据此判断状态是否前进
+        cancel_phase:
+          type: string
+          nullable: true
+          enum: [BEFORE_ACCEPT, AFTER_ACCEPT, AFTER_ARRIVAL, AFTER_RIDING, null]
+
+    TripProgress:
+      type: object
+      required: [trip_id, status, progress_percent]
+      properties:
+        trip_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - REQUESTED
+            - DISPATCHING
+            - MATCHED
+            - DRIVER_EN_ROUTE
+            - DRIVER_ARRIVED
+            - RIDING
+            - ENDED
+            - PAID
+            - CANCELLING
+            - CANCELLED
+            - EXPIRED
+        progress_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        eta_seconds:
+          type: integer
+          nullable: true
+          description: 距下一节点的预计秒数（接驾中为到上车点，行程中为到目的地）
+        driver_location:
+          $ref: '#/components/schemas/GeoPoint'
+        location_fresh:
+          type: boolean
+          description: 位置是否新鲜（≤30 秒）；false 时展示最后已知位置
+        free_wait_until:
+          type: string
+          format: date-time
+          nullable: true
+          description: 免费等待截止时间（司机到达后 5 分钟）
+        updated_at:
+          type: string
+          format: date-time
+
+    CancellationRequest:
+      type: object
+      required: [reason_code]
+      properties:
+        reason_code:
+          type: string
+          enum: [PLAN_CHANGED, WAIT_TOO_LONG, DRIVER_ASKED, WRONG_LOCATION, PASSENGER_NO_SHOW, OTHER]
+        remark:
+          type: string
+          maxLength: 200
+
+    Cancellation:
+      type: object
+      required: [cancellation_id, trip_id, initiator, phase, status]
+      properties:
+        cancellation_id:
+          type: string
+          example: c_20261015_3d91
+        trip_id:
+          type: string
+        initiator:
+          type: string
+          enum: [RIDER, DRIVER, SYSTEM, OPS]
+        phase:
+          type: string
+          enum: [BEFORE_ACCEPT, AFTER_ACCEPT, AFTER_ARRIVAL, AFTER_RIDING]
+        reason_code:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, ACCEPTED, REJECTED]
+        fee_amount:
+          $ref: '#/components/schemas/Money'
+        fee_status:
+          type: string
+          enum: [NONE, UNPAID, PAID, WAIVED]
+        fee_note:
+          type: string
+          example: 司机已到达上车点，收取 5 元取消费
+        can_rebook:
+          type: boolean
+          description: 是否已终态且可重新叫车
+        requested_at:
+          type: string
+          format: date-time
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    Bill:
+      type: object
+      required: [bill_id, trip_id, rider_id, bill_type, items, total_amount, status, due_at]
+      properties:
+        bill_id:
+          type: string
+          example: b_20261015_77c2
+        trip_id:
+          type: string
+        rider_id:
+          type: string
+        bill_type:
+          type: string
+          enum: [TRIP, CANCEL_FEE]
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/FareItem'
+        total_amount:
+          $ref: '#/components/schemas/Money'
+        status:
+          type: string
+          enum: [UNPAID, PAYING, PAID, CLOSED, REFUNDED]
+        due_at:
+          type: string
+          format: date-time
+          description: 软性到期时间（行程结束后 30 分钟）；24 小时后进入硬性拦截
+        paid_at:
+          type: string
+          format: date-time
+          nullable: true
+        estimate_note:
+          type: string
+          nullable: true
+          description: 里程为估算时的说明文案
+
+    CreatePaymentRequest:
+      type: object
+      required: [channel]
+      properties:
+        channel:
+          type: string
+          enum: [WECHAT, ALIPAY, UNIONPAY, AUTO_DEBIT]
+        coupon_id:
+          type: string
+          nullable: true
+
+    Payment:
+      type: object
+      required: [payment_id, bill_id, amount, channel, status]
+      properties:
+        payment_id:
+          type: string
+          example: p_20261015_2f80
+        bill_id:
+          type: string
+        trip_id:
+          type: string
+        amount:
+          $ref: '#/components/schemas/Money'
+        channel:
+          type: string
+          enum: [WECHAT, ALIPAY, UNIONPAY, AUTO_DEBIT]
+        status:
+          type: string
+          enum: [CREATED, PROCESSING, SUCCEEDED, FAILED, CLOSED]
+        pay_params:
+          type: object
+          nullable: true
+          description: 唤起收银台所需参数（渠道相关，客户端透传）
+          additionalProperties: true
+        channel_txn_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        paid_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    Error:
+      type: object
+      required: [code, message, trace_id, retryable]
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_ARGUMENT
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - TRIP_NOT_FOUND
+            - QUOTE_NOT_FOUND
+            - BILL_NOT_FOUND
+            - PAYMENT_FAILED
+            - TRIP_STATE_CONFLICT
+            - UNPAID_BILL_EXISTS
+            - TRIP_NOT_TERMINATED
+            - OPS_INTERVENE_REQUIRED
+            - IDEMPOTENCY_KEY_REUSED
+            - QUOTE_EXPIRED
+            - INVITATION_EXPIRED
+            - RATE_LIMITED
+            - SERVICE_DEGRADED
+            - UPSTREAM_TIMEOUT
+        message:
+          type: string
+          example: 行程已取消，无法接单
+        trace_id:
+          type: string
+        retryable:
+          type: boolean
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              reason:
+                type: string

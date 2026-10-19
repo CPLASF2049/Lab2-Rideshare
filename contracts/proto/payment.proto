@@ -1,0 +1,173 @@
+// 支付账单服务内部接口（rideshare.payment.v1）
+// 职责：账单生成、支付单与渠道交互、回调幂等、退款、欠费判定、结算流水。只管"收到没有"。
+syntax = "proto3";
+
+package rideshare.payment.v1;
+
+option java_multiple_files = true;
+option java_package = "com.rideshare.payment.v1";
+option go_package = "github.com/rideshare/contracts/gen/go/payment/v1;paymentv1";
+
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+service PaymentService {
+  // 生成账单（行程费/取消费）。幂等键：(trip_id, bill_type)
+  rpc CreateBill(CreateBillRequest) returns (CreateBillResponse);
+
+  // 查询账单
+  rpc GetBill(GetBillRequest) returns (GetBillResponse);
+
+  // 发起支付：返回渠道支付参数，供客户端唤起收银台
+  rpc CreatePayment(CreatePaymentRequest) returns (CreatePaymentResponse);
+
+  // 查询支付单
+  rpc GetPayment(GetPaymentRequest) returns (GetPaymentResponse);
+
+  // 退款（运营复核差额、取消误扣等）
+  rpc Refund(RefundRequest) returns (RefundResponse);
+
+  // 欠费校验：叫车前拦截（R-10）
+  rpc HasUnsettledBill(HasUnsettledBillRequest) returns (HasUnsettledBillResponse);
+}
+
+enum BillType {
+  BILL_TYPE_UNSPECIFIED = 0;
+  TRIP = 1;        // 行程费
+  CANCEL_FEE = 2;  // 取消费
+}
+
+enum BillStatus {
+  BILL_STATUS_UNSPECIFIED = 0;
+  UNPAID = 1;
+  PAYING = 2;
+  PAID = 3;
+  CLOSED = 4;
+  REFUNDED = 5;
+}
+
+enum PaymentStatus {
+  PAYMENT_STATUS_UNSPECIFIED = 0;
+  CREATED = 1;
+  PROCESSING = 2;
+  SUCCEEDED = 3;
+  FAILED = 4;
+  CLOSED = 5;
+}
+
+message Bill {
+  string bill_id = 1;
+  string trip_id = 2;
+  string rider_id = 3;
+  BillType bill_type = 4;
+  repeated rideshare.common.v1.FareItem items = 5;
+  rideshare.common.v1.Money total_amount = 6;
+  BillStatus status = 7;
+  google.protobuf.Timestamp due_at = 8;      // 结束后 30 分钟（软限）；24 小时后硬拦截
+  google.protobuf.Timestamp paid_at = 9;
+  string fare_id = 10;
+  string cancellation_id = 11;
+  string estimate_note = 12;                 // 里程为估算时的说明文案
+}
+
+message PaymentOrder {
+  string payment_id = 1;
+  repeated string bill_ids = 2;
+  string rider_id = 3;
+  rideshare.common.v1.Money amount = 4;
+  rideshare.common.v1.PaymentChannel channel = 5;
+  PaymentStatus status = 6;
+  string idempotency_key = 7;
+  string channel_txn_id = 8;
+  map<string, string> pay_params = 9;        // 渠道相关参数，客户端透传
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp paid_at = 11;
+  string trip_id = 12;
+}
+
+message Refund {
+  string refund_id = 1;
+  string payment_id = 2;
+  string trip_id = 3;
+  rideshare.common.v1.Money amount = 4;
+  enum RefundStatus {
+    REFUND_STATUS_UNSPECIFIED = 0;
+    REFUND_PENDING = 1;
+    REFUND_SUCCEEDED = 2;
+    REFUND_FAILED = 3;
+  }
+  RefundStatus status = 5;
+  string channel_refund_no = 6;
+  string reason = 7;
+  google.protobuf.Timestamp refunded_at = 8;
+}
+
+message CreateBillRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string trip_id = 2;
+  string rider_id = 3;
+  BillType bill_type = 4;
+  string fare_id = 5;
+  string cancellation_id = 6;
+  repeated rideshare.common.v1.FareItem items = 7;
+  rideshare.common.v1.Money total_amount = 8;
+}
+
+message CreateBillResponse {
+  Bill bill = 1;
+  bool idempotent_replay = 2;
+}
+
+message GetBillRequest {
+  string bill_id = 1;
+  string trip_id = 2;   // bill_id 为空时按 trip_id 查最近一张账单
+}
+
+message GetBillResponse {
+  Bill bill = 1;
+}
+
+message CreatePaymentRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string bill_id = 2;
+  string rider_id = 3;
+  rideshare.common.v1.PaymentChannel channel = 4;
+  string coupon_id = 5;
+}
+
+message CreatePaymentResponse {
+  PaymentOrder payment = 1;
+  bool idempotent_replay = 2;
+}
+
+message GetPaymentRequest {
+  string payment_id = 1;
+}
+
+message GetPaymentResponse {
+  PaymentOrder payment = 1;
+}
+
+message RefundRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string payment_id = 2;
+  rideshare.common.v1.Money amount = 3;
+  string reason = 4;
+  string operator_id = 5;   // 运营发起时必填，写入审计
+}
+
+message RefundResponse {
+  Refund refund = 1;
+}
+
+message HasUnsettledBillRequest {
+  string rider_id = 1;
+  int32 hard_limit_hours = 2;   // 默认 24（R-09/R-10）
+}
+
+message HasUnsettledBillResponse {
+  bool has_unsettled = 1;
+  repeated string bill_ids = 2;
+  rideshare.common.v1.Money total_amount = 3;
+  google.protobuf.Timestamp oldest_due_at = 4;
+}

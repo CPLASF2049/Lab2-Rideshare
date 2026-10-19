@@ -1,0 +1,17 @@
+{
+  "event_id": "evt_01J9Z4A6KQ8M2R3T",
+  "event_type": "trip.arrived.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:38:26+08:00",
+  "producer": "trip-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "payload": {
+    "trip_id": "t_20261015_51bd",
+    "driver_id": "d_77120",
+    "arrived_at": "2026-10-15T08:38:25+08:00",
+    "free_wait_until": "2026-10-15T08:43:25+08:00",
+    "arrival_anomaly": false
+  }
+}

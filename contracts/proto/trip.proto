@@ -1,0 +1,279 @@
+// 行程服务内部接口（rideshare.trip.v1）
+// 职责：行程状态机权威、履约事实登记、取消受理与裁决、进度视图组装、运营人工介入。
+syntax = "proto3";
+
+package rideshare.trip.v1;
+
+option java_multiple_files = true;
+option java_package = "com.rideshare.trip.v1";
+option go_package = "github.com/rideshare/contracts/gen/go/trip/v1;tripv1";
+
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+service TripService {
+  // 创建行程：校验报价与欠费，落库 REQUESTED，发布 trip.requested.v1
+  rpc CreateTrip(CreateTripRequest) returns (CreateTripResponse);
+
+  // 查询行程
+  rpc GetTrip(GetTripRequest) returns (GetTripResponse);
+
+  // 行程进度（面客视图：状态 + 车辆位置 + ETA）
+  rpc GetTripProgress(GetTripProgressRequest) returns (TripProgress);
+
+  // 权威裁决接单：CAS DISPATCHING -> MATCHED，与取消并发时只有一个能成功
+  rpc ConfirmMatch(ConfirmMatchRequest) returns (ConfirmMatchResponse);
+
+  // 履约事实登记
+  rpc RecordArrival(RecordArrivalRequest) returns (RecordArrivalResponse);
+  rpc RecordBoarding(RecordBoardingRequest) returns (RecordBoardingResponse);
+  rpc CompleteTrip(CompleteTripRequest) returns (CompleteTripResponse);
+
+  // 取消：受理（返回 202 语义）与结果查询
+  rpc RequestCancellation(RequestCancellationRequest) returns (RequestCancellationResponse);
+  rpc GetCancellation(GetCancellationRequest) returns (GetCancellationResponse);
+
+  // 重新叫车：复用原起终点，重新报价后创建新行程
+  rpc RebookTrip(RebookTripRequest) returns (RebookTripResponse);
+
+  // 运营人工介入（上车后取消、判责复核），必须写审计
+  rpc ApplyIntervention(ApplyInterventionRequest) returns (ApplyInterventionResponse);
+
+  // 服务端流：进度推送的补充通道（长连接场景以 WS 为主）
+  rpc WatchTripProgress(WatchTripProgressRequest) returns (stream TripProgress);
+}
+
+// ---------------------------------------------------------------- 行程实体
+
+message Trip {
+  string trip_id = 1;
+  string rider_id = 2;
+  string driver_id = 3;             // 未接单时为空
+  string vehicle_id = 4;            // 未接单时为空
+  string city_code = 5;             // SH / HZ / NJ
+  rideshare.common.v1.TripStatus status = 6;
+  string quote_id = 7;
+  rideshare.common.v1.Money quote_total_amount = 8;  // 报价金额快照，仅用于展示与比对
+  string fare_id = 9;               // 计价完成后回填
+  string payment_id = 10;           // 支付单，支付完成后回填
+  string rebook_from_trip_id = 11;  // 由"重新叫车"创建时指向原行程
+  rideshare.common.v1.GeoPoint origin = 12;
+  rideshare.common.v1.GeoPoint dest = 13;
+  google.protobuf.Timestamp created_at = 14;
+  google.protobuf.Timestamp matched_at = 15;
+  google.protobuf.Timestamp arrived_at = 16;
+  google.protobuf.Timestamp boarded_at = 17;
+  google.protobuf.Timestamp ended_at = 18;
+  google.protobuf.Timestamp paid_at = 19;
+  int32 version = 20;               // 乐观锁版本
+  rideshare.common.v1.CancellationPhase cancel_phase = 21;
+  bool arrival_anomaly = 22;
+  string cancel_reason_code = 23;
+}
+
+// 计量封存：行程结束时一次性写入，之后只读
+message Metering {
+  int32 distance_m = 1;
+  int32 duration_s = 2;
+  int32 waiting_s = 3;
+  rideshare.common.v1.EstimateMode estimate_mode = 4;
+  google.protobuf.Timestamp sealed_at = 5;
+  string route_polyline_digest = 6;
+}
+
+message Cancellation {
+  string cancellation_id = 1;
+  string trip_id = 2;
+  rideshare.common.v1.CancellationInitiator initiator = 3;
+  rideshare.common.v1.CancellationPhase phase = 4;
+  string reason_code = 5;
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    PENDING = 1;
+    ACCEPTED = 2;
+    REJECTED = 3;
+  }
+  Status status = 6;
+  rideshare.common.v1.Money fee_amount = 7;
+  enum FeeStatus {
+    FEE_STATUS_UNSPECIFIED = 0;
+    FEE_NONE = 1;
+    FEE_UNPAID = 2;
+    FEE_PAID = 3;
+    FEE_WAIVED = 4;
+  }
+  FeeStatus fee_status = 8;
+  string fee_note = 9;
+  google.protobuf.Timestamp requested_at = 10;
+  google.protobuf.Timestamp decided_at = 11;
+  bool can_rebook = 12;
+}
+
+message TripProgress {
+  string trip_id = 1;
+  rideshare.common.v1.TripStatus status = 2;
+  int32 progress_percent = 3;
+  int32 eta_seconds = 4;
+  rideshare.common.v1.GeoPoint driver_location = 5;
+  bool location_fresh = 6;          // 位置是否新鲜（<= 30 秒）
+  google.protobuf.Timestamp free_wait_until = 7;
+  int32 seq = 8;                    // 单调递增序号，供断线补推比对
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// ---------------------------------------------------------------- 方法消息
+
+message CreateTripRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string rider_id = 2;
+  string quote_id = 3;
+  rideshare.common.v1.PaymentChannel payment_method = 4;
+  rideshare.common.v1.GeoPoint origin = 5;
+  rideshare.common.v1.GeoPoint dest = 6;
+}
+
+message CreateTripResponse {
+  Trip trip = 1;
+  bool idempotent_replay = 2;       // true 表示命中幂等，未产生新行程
+}
+
+message GetTripRequest {
+  string trip_id = 1;
+  string caller_account_id = 2;     // 用于归属校验
+  string caller_role = 3;           // RIDER / DRIVER / OPS_*
+}
+
+message GetTripResponse {
+  Trip trip = 1;
+}
+
+message GetTripProgressRequest {
+  string trip_id = 1;
+}
+
+message ConfirmMatchRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string trip_id = 2;
+  string dispatch_id = 3;
+  string invite_id = 4;
+  string driver_id = 5;
+  string vehicle_id = 6;
+  int32 expected_version = 7;       // 传 0 表示不校验版本
+}
+
+message ConfirmMatchResponse {
+  Trip trip = 1;
+  int32 eta_seconds = 2;
+  bool already_matched = 3;         // 幂等：同一 invite 重复确认
+}
+
+message RecordArrivalRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string trip_id = 2;
+  string driver_id = 3;
+  rideshare.common.v1.GeoPoint location = 4;
+  double accuracy_m = 5;
+}
+
+message RecordArrivalResponse {
+  google.protobuf.Timestamp arrived_at = 1;
+  google.protobuf.Timestamp free_wait_until = 2;  // arrived_at + 5 分钟（R-06）
+  bool arrival_anomaly = 3;                       // 距上车点 > 200 m
+}
+
+message RecordBoardingRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string trip_id = 2;
+  string driver_id = 3;
+  string passenger_code_suffix = 4; // 可选，与乘客核对手机号后四位
+}
+
+message RecordBoardingResponse {
+  google.protobuf.Timestamp boarded_at = 1;
+  int32 waiting_s = 2;              // 超出免费等待的秒数
+}
+
+message CompleteTripRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string trip_id = 2;
+  string driver_id = 3;
+  rideshare.common.v1.GeoPoint dest = 4;
+  string toll_amount = 5;           // 司机录入的附加费（"0.00" 表示无）
+}
+
+message CompleteTripResponse {
+  Trip trip = 1;
+  Metering metering = 2;
+}
+
+message RequestCancellationRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string trip_id = 2;
+  rideshare.common.v1.CancellationInitiator initiator = 3;
+  string initiator_id = 4;          // rider_id 或 driver_id 或 ops_id
+  string reason_code = 5;
+  string remark = 6;
+}
+
+message RequestCancellationResponse {
+  Cancellation cancellation = 1;    // status = PENDING（异步判责中）
+  bool idempotent_replay = 2;
+}
+
+message GetCancellationRequest {
+  string trip_id = 1;
+}
+
+message GetCancellationResponse {
+  Cancellation cancellation = 1;
+}
+
+message RebookTripRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string source_trip_id = 2;
+  string rider_id = 3;
+  rideshare.common.v1.PaymentChannel payment_method = 4;
+}
+
+message RebookTripResponse {
+  Trip trip = 1;
+  bool idempotent_replay = 2;
+}
+
+message ApplyInterventionRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string trip_id = 2;
+  string ticket_id = 3;
+  string operator_id = 4;
+  enum InterventionType {
+    INTERVENTION_TYPE_UNSPECIFIED = 0;
+    CANCEL_AFTER_RIDING = 1;
+    REVIEW_CANCEL_FEE = 2;
+    REVIEW_FARE = 3;
+    DRIVER_PENALTY = 4;
+  }
+  InterventionType type = 5;
+  enum Decision {
+    DECISION_UNSPECIFIED = 0;
+    CANCEL = 1;
+    CONTINUE = 2;
+    WAIVE_FEE = 3;
+    CHARGE_FEE = 4;
+    REFUND_DIFF = 5;
+    PENALIZE = 6;
+    NO_ACTION = 7;
+  }
+  Decision decision = 6;
+  string reason = 7;                // 必填，写入审计日志
+}
+
+message ApplyInterventionResponse {
+  Trip trip = 1;
+  rideshare.common.v1.Money result_amount = 2;
+  google.protobuf.Timestamp finished_at = 3;
+}
+
+message WatchTripProgressRequest {
+  string trip_id = 1;
+  int32 last_seq = 2;
+}

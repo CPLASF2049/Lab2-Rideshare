@@ -1,0 +1,128 @@
+// 通知服务内部接口（rideshare.notification.v1）
+// 职责：模板与多通道发送、去重与重试、回执；实时订阅关系与断线补推。
+// WebSocket 连接由 realtime-gateway 承载，本服务只维护"谁订阅了什么"与推送内容。
+syntax = "proto3";
+
+package rideshare.notification.v1;
+
+option java_multiple_files = true;
+option java_package = "com.rideshare.notification.v1";
+option go_package = "github.com/rideshare/contracts/gen/go/notification/v1;notificationv1";
+
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+service NotificationService {
+  // 主动发送通知（业务服务一般不直接调用，通常订阅事件）
+  rpc SendNotification(SendNotificationRequest) returns (SendNotificationResponse);
+
+  // 注册实时订阅：WS 连接建立后由网关调用
+  rpc RegisterSubscription(RegisterSubscriptionRequest) returns (RegisterSubscriptionResponse);
+
+  // 注销订阅：连接关闭时调用（尽力而为，靠 expire_at 兜底）
+  rpc UnregisterSubscription(UnregisterSubscriptionRequest) returns (UnregisterSubscriptionResponse);
+
+  // 断线补推：客户端携带 last_seq 重连，返回遗漏的增量更新
+  rpc GetMissedUpdates(GetMissedUpdatesRequest) returns (GetMissedUpdatesResponse);
+}
+
+enum Channel {
+  CHANNEL_UNSPECIFIED = 0;
+  SMS = 1;
+  PUSH = 2;
+  INBOX = 3;
+}
+
+enum SubscribeType {
+  SUBSCRIBE_TYPE_UNSPECIFIED = 0;
+  TRIP_PROGRESS = 1;    // target_id = trip_id
+  DRIVER_LOCATION = 2;  // target_id = driver_id
+}
+
+message NotificationMessage {
+  string message_id = 1;
+  string biz_key = 2;               // event_id + receiver + channel，用于去重
+  string template_id = 3;
+  Channel channel = 4;
+  string receiver_id = 5;
+  enum MessageStatus {
+    MESSAGE_STATUS_UNSPECIFIED = 0;
+    QUEUED = 1;
+    SENT = 2;
+    FAILED = 3;
+    RECEIPTED = 4;
+  }
+  MessageStatus status = 6;
+  int32 retry_count = 7;
+  google.protobuf.Timestamp sent_at = 8;
+  string receipt = 9;
+}
+
+message SendNotificationRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string biz_key = 2;
+  string template_id = 3;
+  Channel channel = 4;
+  string receiver_id = 5;
+  map<string, string> variables = 6; // 模板变量，如 trip_id / driver_name / fee_amount
+}
+
+message SendNotificationResponse {
+  NotificationMessage message = 1;
+  bool deduplicated = 2;             // true 表示 biz_key 命中，未重复发送
+}
+
+message Subscription {
+  string subscription_id = 1;
+  string account_id = 2;
+  string role = 3;                   // RIDER / DRIVER
+  SubscribeType subscribe_type = 4;
+  string target_id = 5;
+  string conn_id = 6;
+  google.protobuf.Timestamp expire_at = 7;
+  int32 last_seq = 8;
+}
+
+message RegisterSubscriptionRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string conn_id = 2;
+  string account_id = 3;
+  string role = 4;
+  repeated SubscribeTarget targets = 5;
+}
+
+message SubscribeTarget {
+  SubscribeType subscribe_type = 1;
+  string target_id = 2;
+}
+
+message RegisterSubscriptionResponse {
+  repeated Subscription subscriptions = 1;
+}
+
+message UnregisterSubscriptionRequest {
+  string conn_id = 1;
+}
+
+message UnregisterSubscriptionResponse {
+  int32 removed = 1;
+}
+
+message MissedUpdate {
+  int32 seq = 1;
+  string event_type = 2;             // 如 trip.matched.v1 / location.updated.v1
+  string payload_json = 3;           // 与事件 payload 同构的 JSON
+  google.protobuf.Timestamp occurred_at = 4;
+}
+
+message GetMissedUpdatesRequest {
+  string subscription_id = 1;
+  int32 last_seq = 2;
+  int32 limit = 3;                   // 默认 50，最大 200
+}
+
+message GetMissedUpdatesResponse {
+  repeated MissedUpdate updates = 1;
+  int32 latest_seq = 2;
+  bool gap_detected = 3;             // true 表示遗漏过多，建议客户端全量拉一次基准
+}

@@ -1,0 +1,19 @@
+{
+  "event_id": "evt_01J9Z4D8WJ2Y6A0B",
+  "event_type": "payment.failed.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T09:02:35+08:00",
+  "producer": "payment-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "6f1d9a2c3b4e5f60718293a4b5c6d7e8",
+  "payload": {
+    "payment_id": "p_20261015_2f80",
+    "bill_id": "b_20261015_77c2",
+    "trip_id": "t_20261015_51bd",
+    "amount": { "amount": "38.21", "currency": "CNY" },
+    "channel": "AUTO_DEBIT",
+    "channel_code": "BALANCE_NOT_ENOUGH",
+    "retryable": true
+  }
+}

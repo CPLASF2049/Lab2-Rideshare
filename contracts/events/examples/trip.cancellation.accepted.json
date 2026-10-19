@@ -1,0 +1,19 @@
+{
+  "event_id": "evt_01J9Z5C3TY6V9X1Z",
+  "event_type": "trip.cancellation.accepted.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:33:42+08:00",
+  "producer": "trip-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "1a2b3c4d5e6f708192a3b4c5d6e7f809",
+  "payload": {
+    "trip_id": "t_20261015_51bd",
+    "cancellation_id": "c_20261015_3d91",
+    "initiator": "RIDER",
+    "phase": "AFTER_ACCEPT",
+    "fee_amount": { "amount": "0.00", "currency": "CNY" },
+    "fee_status": "NONE",
+    "canceled_at": "2026-10-15T08:33:42+08:00"
+  }
+}

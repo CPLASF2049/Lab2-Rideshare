@@ -1,0 +1,24 @@
+{
+  "event_id": "evt_01J9Z3M2XA7Q5V6N",
+  "event_type": "trip.matched.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:31:14+08:00",
+  "producer": "trip-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "payload": {
+    "trip_id": "t_20261015_51bd",
+    "rider_id": "a_1002381",
+    "driver_id": "d_77120",
+    "vehicle_id": "v_31225",
+    "invite_id": "inv_20261015_8812",
+    "pickup": {
+      "lat": 31.2304,
+      "lng": 121.4737,
+      "address": "上海市黄浦区南京东路 100 号"
+    },
+    "eta_seconds": 420,
+    "matched_at": "2026-10-15T08:31:14+08:00"
+  }
+}

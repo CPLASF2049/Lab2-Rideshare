@@ -1,0 +1,18 @@
+{
+  "event_id": "evt_01J9Z5A1RQ3S5U7W",
+  "event_type": "trip.cancellation.requested.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:33:40+08:00",
+  "producer": "trip-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "1a2b3c4d5e6f708192a3b4c5d6e7f809",
+  "payload": {
+    "trip_id": "t_20261015_51bd",
+    "cancellation_id": "c_20261015_3d91",
+    "initiator": "RIDER",
+    "phase": "AFTER_ACCEPT",
+    "reason_code": "PLAN_CHANGED",
+    "requested_at": "2026-10-15T08:33:40+08:00"
+  }
+}

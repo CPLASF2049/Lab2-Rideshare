@@ -1,0 +1,20 @@
+{
+  "event_id": "evt_01J9Z4H7YZ3A5B9C",
+  "event_type": "location.updated.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:52:16+08:00",
+  "producer": "location-service",
+  "city_code": "SH",
+  "partition_key": "d_77120",
+  "trace_id": "9a1c2b3d4e5f60718293a4b5c6d7e8f9",
+  "payload": {
+    "driver_id": "d_77120",
+    "trip_id": "t_20261015_51bd",
+    "lat": 31.2118,
+    "lng": 121.4188,
+    "heading": 268.5,
+    "eta_seconds": 320,
+    "seq": 1842,
+    "reported_at": "2026-10-15T08:52:16+08:00"
+  }
+}

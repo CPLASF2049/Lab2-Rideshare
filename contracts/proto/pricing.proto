@@ -1,0 +1,137 @@
+// 计价服务内部接口（rideshare.pricing.v1）
+// 职责：路线与 ETA 预估、报价、行程费用（fare）、取消费用。只管"该收多少"，不管收钱。
+syntax = "proto3";
+
+package rideshare.pricing.v1;
+
+option java_multiple_files = true;
+option java_package = "com.rideshare.pricing.v1";
+option go_package = "github.com/rideshare/contracts/gen/go/pricing/v1;pricingv1";
+
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+service PricingService {
+  // 生成报价快照（有效期 5 分钟，R-01）
+  rpc CreateQuote(CreateQuoteRequest) returns (CreateQuoteResponse);
+
+  // 查询报价：下单前置校验，过期返回 FAILED_PRECONDITION(QUOTE_EXPIRED)
+  rpc GetQuote(GetQuoteRequest) returns (GetQuoteResponse);
+
+  // 计算行程费用：消费 trip.ended.v1 后由内部触发，也可用于运营重算
+  rpc CalculateFare(CalculateFareRequest) returns (CalculateFareResponse);
+
+  // 查询行程费用
+  rpc GetFare(GetFareRequest) returns (GetFareResponse);
+
+  // 计算取消费用：消费 trip.cancellation.requested.v1 后由内部触发
+  rpc CalculateCancellationFee(CalculateCancellationFeeRequest) returns (CalculateCancellationFeeResponse);
+}
+
+// 报价：一次价格承诺的不可变快照
+message Quote {
+  string quote_id = 1;
+  string rider_id = 2;
+  string city_code = 3;
+  rideshare.common.v1.GeoPoint origin = 4;
+  rideshare.common.v1.GeoPoint dest = 5;
+  int32 est_distance_m = 6;
+  int32 est_duration_s = 7;
+  repeated rideshare.common.v1.FareItem items = 8;
+  rideshare.common.v1.Money total_amount = 9;
+  double surge_multiplier = 10;      // 1.0 ~ 2.5
+  string rule_version = 11;          // 例 "SH-2026-10-01"
+  google.protobuf.Timestamp created_at = 12;
+  google.protobuf.Timestamp expire_at = 13;      // created_at + 5min
+  bool degraded = 14;                // 地图服务降级（直线距离估算）
+}
+
+// 行程费用：一个行程至少一个版本，ACTIVE 版本唯一
+message Fare {
+  string fare_id = 1;
+  string trip_id = 2;
+  int32 fare_version = 3;            // 从 1 开始；运营复核调整时 +1
+  int32 distance_m = 4;
+  int32 duration_s = 5;
+  int32 waiting_s = 6;
+  repeated rideshare.common.v1.FareItem items = 7;
+  rideshare.common.v1.Money total_amount = 8;
+  string rule_version = 9;
+  rideshare.common.v1.EstimateMode estimate_mode = 10;
+  google.protobuf.Timestamp calculated_at = 11;
+}
+
+// 取消费用
+message CancellationFee {
+  string cancel_fee_id = 1;
+  string trip_id = 2;
+  string cancellation_id = 3;
+  rideshare.common.v1.CancellationPhase phase = 4;
+  rideshare.common.v1.Money amount = 5;   // 0.00 表示不收费
+  string rule_version = 6;
+  string note = 7;                        // 例 "等待超时取消费"
+  google.protobuf.Timestamp calculated_at = 8;
+}
+
+message CreateQuoteRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string rider_id = 2;
+  string city_code = 3;
+  rideshare.common.v1.GeoPoint origin = 4;
+  rideshare.common.v1.GeoPoint dest = 5;
+}
+
+message CreateQuoteResponse {
+  Quote quote = 1;
+}
+
+message GetQuoteRequest {
+  string quote_id = 1;
+  bool validate_validity = 2;       // true 时过期返回错误
+}
+
+message GetQuoteResponse {
+  Quote quote = 1;
+  bool expired = 2;
+}
+
+message CalculateFareRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string trip_id = 2;
+  string quote_id = 3;              // 取调价系数与规则版本的快照依据
+  int32 distance_m = 4;
+  int32 duration_s = 5;
+  int32 waiting_s = 6;
+  rideshare.common.v1.EstimateMode estimate_mode = 7;
+  string toll_amount = 8;           // 附加费（高速/停车），"0.00" 表示无
+  int32 fare_version = 9;           // 复核重算时传 >1，普通计算传 0/1
+}
+
+message CalculateFareResponse {
+  Fare fare = 1;
+  bool idempotent_replay = 2;
+}
+
+message GetFareRequest {
+  string trip_id = 1;
+  int32 fare_version = 2;           // 0 表示取 ACTIVE 版本
+}
+
+message GetFareResponse {
+  Fare fare = 1;
+}
+
+message CalculateCancellationFeeRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string trip_id = 2;
+  string cancellation_id = 3;
+  rideshare.common.v1.CancellationPhase phase = 4;
+  google.protobuf.Timestamp arrived_at = 5;          // AFTER_ARRIVAL 判定免费等待用
+  google.protobuf.Timestamp cancel_requested_at = 6;
+  string city_code = 7;
+}
+
+message CalculateCancellationFeeResponse {
+  CancellationFee cancel_fee = 1;
+  bool idempotent_replay = 2;
+}

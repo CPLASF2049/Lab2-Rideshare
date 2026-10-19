@@ -1,0 +1,16 @@
+{
+  "event_id": "evt_01J9Z5D9QW2E4R6T",
+  "event_type": "trip.expired.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:34:02+08:00",
+  "producer": "trip-service",
+  "city_code": "HZ",
+  "partition_key": "t_20261015_9a3c",
+  "trace_id": "2b3c4d5e6f708192a3b4c5d6e7f8091a",
+  "payload": {
+    "trip_id": "t_20261015_9a3c",
+    "rider_id": "a_1004477",
+    "reason": "NO_DRIVER_WITHIN_180S",
+    "expired_at": "2026-10-15T08:34:02+08:00"
+  }
+}

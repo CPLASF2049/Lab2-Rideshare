@@ -1,0 +1,19 @@
+{
+  "event_id": "evt_01J9Z5B7MN4P8R2S",
+  "event_type": "pricing.cancel_fee.calculated.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:33:41+08:00",
+  "producer": "pricing-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "1a2b3c4d5e6f708192a3b4c5d6e7f809",
+  "payload": {
+    "cancel_fee_id": "cf_20261015_9e3b",
+    "trip_id": "t_20261015_51bd",
+    "cancellation_id": "c_20261015_3d91",
+    "phase": "AFTER_ACCEPT",
+    "amount": { "amount": "0.00", "currency": "CNY" },
+    "rule_version": "SH-CANCEL-2026-10-01",
+    "note": "司机接单后乘客取消，处于免费期内，不收取消费"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "event_id": "evt_01J9Z5G1RS4T6V8W",
+  "event_type": "dispatch.failed.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:33:58+08:00",
+  "producer": "dispatch-service",
+  "city_code": "HZ",
+  "partition_key": "t_20261015_9a3c",
+  "trace_id": "2b3c4d5e6f708192a3b4c5d6e7f8091a",
+  "payload": {
+    "dispatch_id": "dp_20261015_2b7f",
+    "trip_id": "t_20261015_9a3c",
+    "reason": "ROUNDS_EXHAUSTED",
+    "rounds": 5,
+    "candidate_count": 3,
+    "last_radius_m": 5000
+  }
+}

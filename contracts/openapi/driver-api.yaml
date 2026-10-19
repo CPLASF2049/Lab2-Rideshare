@@ -1,0 +1,746 @@
+openapi: 3.0.3
+
+info:
+  title: 网约车平台 · 司机端接口（Driver API）
+  version: 1.0.0
+  description: |
+    面向司机 App 的 REST 接口，经 `api-gateway` 统一暴露。
+    约定与乘客端一致（鉴权、幂等、错误体、金额与坐标格式见 `rider-api.yaml`）。
+    角色要求：JWT 中必须包含 `DRIVER`。
+
+servers:
+  - url: https://api.rideshare.example.com
+    description: 生产环境（按城市就近接入：sh / hz / nj）
+
+tags:
+  - name: Driver
+    description: 司机档案、车辆与在线状态（driver-service）
+  - name: Invitation
+    description: 派单邀请（dispatch-service）
+  - name: Trip
+    description: 接驾、上车、结束行程与取消（trip-service）
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/driver/status:
+    put:
+      tags: [Driver]
+      summary: 设置在线状态（上线/下线/置忙）
+      operationId: updateDriverStatus
+      description: |
+        `ONLINE` 表示可被派单（还要求资质有效、无进行中行程）；`BUSY` 由系统在接单时设置，
+        司机主动置 `BUSY` 视为"暂时不接单"。行程进行中（`current_trip_id` 非空）不允许置 `OFFLINE`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [online_status]
+              properties:
+                online_status:
+                  type: string
+                  enum: [ONLINE, OFFLINE]
+                service_city:
+                  type: string
+                  enum: [SH, HZ, NJ]
+      responses:
+        '200':
+          description: 最新状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverStatus'
+        '409':
+          description: 行程进行中不得下线（TRIP_STATE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/driver/profile:
+    get:
+      tags: [Driver]
+      summary: 查询司机档案
+      operationId: getDriverProfile
+      responses:
+        '200':
+          description: 档案（含资质与车辆摘要）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverProfile'
+    put:
+      tags: [Driver]
+      summary: 更新司机资料
+      operationId: updateDriverProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                nickname:
+                  type: string
+                  maxLength: 30
+                emergency_contact:
+                  type: string
+                  maxLength: 30
+      responses:
+        '200':
+          description: 更新后的档案
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverProfile'
+
+  /v1/driver/vehicle:
+    put:
+      tags: [Driver]
+      summary: 绑定或更换车辆
+      operationId: upsertVehicle
+      description: 更换车辆后营运证需重新审核，审核通过前 `dispatch_eligible=false`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VehicleInput'
+      responses:
+        '200':
+          description: 车辆信息与审核状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vehicle'
+
+  /v1/driver/invitations:
+    get:
+      tags: [Invitation]
+      summary: 拉取待处理邀请
+      operationId: listInvitations
+      description: WebSocket 推送的兜底通道；仅返回 `PENDING` 且未过期的邀请（15 秒有效期）。
+      responses:
+        '200':
+          description: 待处理邀请列表（通常 0 或 1 条）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invitations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Invitation'
+
+  /v1/driver/invitations/{invite_id}/acceptance:
+    post:
+      tags: [Invitation]
+      summary: 接受邀请（接单）
+      operationId: acceptInvitation
+      description: |
+        服务端做并发裁决：`dispatch-service` 对邀请 CAS（`PENDING → ACCEPTED`），随后由
+        `trip-service` 的 `ConfirmMatch` 权威确认行程状态。任一环节失败返回 `409`，
+        司机保持原在线状态且**不计责**（冲突场景见报告 §4.2 异常分支 A8）。
+      parameters:
+        - $ref: '#/components/parameters/InviteId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 接单成功，返回行程摘要与接驾信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Acceptance'
+        '409':
+          description: 邀请已被处理或行程已不可接（INVITATION_EXPIRED / TRIP_STATE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '410':
+          description: 邀请已超时（INVITATION_EXPIRED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/driver/invitations/{invite_id}/rejection:
+    post:
+      tags: [Invitation]
+      summary: 拒绝邀请
+      operationId: rejectInvitation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason_code]
+              properties:
+                reason_code:
+                  type: string
+                  enum: [TOO_FAR, TRAFFIC, RESTING, VEHICLE_ISSUE, OTHER]
+      parameters:
+        - $ref: '#/components/parameters/InviteId'
+      responses:
+        '204':
+          description: 已拒绝（后续由派单服务邀请下一位候选）
+        '409':
+          description: 邀请已被处理（INVITATION_EXPIRED / TRIP_STATE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/driver/trips/current:
+    get:
+      tags: [Trip]
+      summary: 查询当前行程
+      operationId: getCurrentTrip
+      responses:
+        '200':
+          description: 当前行程（无进行中行程时返回 `trip=null`）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trip:
+                    $ref: '#/components/schemas/DriverTrip'
+
+  /v1/trips/{trip_id}/arrival:
+    post:
+      tags: [Trip]
+      summary: 上报到达上车点
+      operationId: reportArrival
+      description: |
+        校验 `status=DRIVER_EN_ROUTE` 且调用者是该行程司机；距上车点 > 200 m 仍接受但打标
+        `arrival_anomaly=true`（计入司机考核，不阻断流程）。
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lat, lng]
+              properties:
+                lat:
+                  type: number
+                  format: double
+                lng:
+                  type: number
+                  format: double
+                accuracy_m:
+                  type: number
+                  format: double
+      responses:
+        '200':
+          description: 到达已登记，返回免费等待截止时间
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trip_id, status, arrived_at, free_wait_until]
+                properties:
+                  trip_id:
+                    type: string
+                  status:
+                    type: string
+                    example: DRIVER_ARRIVED
+                  arrived_at:
+                    type: string
+                    format: date-time
+                  free_wait_until:
+                    type: string
+                    format: date-time
+                  arrival_anomaly:
+                    type: boolean
+        '409':
+          description: 状态不允许上报到达（TRIP_STATE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/trips/{trip_id}/boarding:
+    post:
+      tags: [Trip]
+      summary: 确认乘客已上车
+      operationId: confirmBoarding
+      description: |
+        要求 `status=DRIVER_ARRIVED`；成功后行程进入 `RIDING`，计费起点为 `boarded_at`，
+        超出免费等待（5 分钟）的部分计入 `waiting_s`。
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                passenger_code_suffix:
+                  type: string
+                  maxLength: 4
+                  description: 可选：与乘客核对手机号后四位
+      responses:
+        '200':
+          description: 行程已开始
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trip_id, status, boarded_at]
+                properties:
+                  trip_id:
+                    type: string
+                  status:
+                    type: string
+                    example: RIDING
+                  boarded_at:
+                    type: string
+                    format: date-time
+                  waiting_s:
+                    type: integer
+                    description: 超出免费等待的秒数，用于计算等待费
+        '409':
+          description: 未上报到达或状态不符（TRIP_STATE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/trips/{trip_id}/completion:
+    post:
+      tags: [Trip]
+      summary: 结束行程
+      operationId: completeTrip
+      description: |
+        要求 `status=RIDING`。服务端依据轨迹汇总里程/时长并**封存计量**（`trip_metering`），
+        行程进入 `ENDED`，随后由计价与支付服务生成费用与账单。
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dest_lat, dest_lng]
+              properties:
+                dest_lat:
+                  type: number
+                  format: double
+                dest_lng:
+                  type: number
+                  format: double
+                toll_amount:
+                  type: string
+                  pattern: '^\d+\.\d{2}$'
+                  description: 高速/停车等附加费，由司机录入并由平台复核
+      responses:
+        '200':
+          description: 行程已结束，返回计量封存结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trip_id, status, metering]
+                properties:
+                  trip_id:
+                    type: string
+                  status:
+                    type: string
+                    example: ENDED
+                  metering:
+                    $ref: '#/components/schemas/Metering'
+        '409':
+          description: 状态不允许结束（TRIP_STATE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/trips/{trip_id}/cancellations:
+    post:
+      tags: [Trip]
+      summary: 司机申请取消
+      operationId: driverRequestCancellation
+      description: |
+        司机取消**不向乘客收费**（规则 R-11）。行程回到 `DISPATCHING` 由派单服务重新派车，
+        同时司机取消次数计入考核；若乘客已上车（`RIDING`）则返回 `409 OPS_INTERVENE_REQUIRED`。
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason_code]
+              properties:
+                reason_code:
+                  type: string
+                  enum: [PASSENGER_NO_SHOW, VEHICLE_ISSUE, PASSENGER_ASKED, SAFETY_CONCERN, OTHER]
+                remark:
+                  type: string
+                  maxLength: 200
+      responses:
+        '202':
+          description: 取消申请已受理（异步判责）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cancellation'
+        '409':
+          description: 状态不允许取消（TRIP_STATE_CONFLICT / OPS_INTERVENE_REQUIRED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TripId:
+      name: trip_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^t_[0-9A-Za-z_]+$'
+    InviteId:
+      name: invite_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^inv_[0-9A-Za-z_]+$'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: '^\d+\.\d{2}$'
+          example: '38.60'
+        currency:
+          type: string
+          enum: [CNY]
+
+    DriverStatus:
+      type: object
+      required: [driver_id, online_status, dispatch_eligible]
+      properties:
+        driver_id:
+          type: string
+          example: d_77120
+        online_status:
+          type: string
+          enum: [OFFLINE, ONLINE, BUSY]
+        dispatch_eligible:
+          type: boolean
+          description: 在线 ∧ 资质有效 ∧ 无进行中行程 ∧ 无冷却
+        current_trip_id:
+          type: string
+          nullable: true
+        changed_at:
+          type: string
+          format: date-time
+
+    DriverProfile:
+      type: object
+      required: [driver_id, account_id, service_city, rating]
+      properties:
+        driver_id:
+          type: string
+        account_id:
+          type: string
+        real_name_masked:
+          type: string
+          example: 张*明
+        service_city:
+          type: string
+          enum: [SH, HZ, NJ]
+        rating:
+          type: number
+          format: double
+          minimum: 1
+          maximum: 5
+          example: 4.92
+        accept_rate:
+          type: number
+          format: double
+          example: 0.86
+        qualifications:
+          type: array
+          items:
+            $ref: '#/components/schemas/Qualification'
+        vehicle:
+          $ref: '#/components/schemas/Vehicle'
+
+    Qualification:
+      type: object
+      required: [type, audit_status]
+      properties:
+        type:
+          type: string
+          enum: [DRIVER_LICENSE, VEHICLE_CERT]
+        cert_no_masked:
+          type: string
+        expire_at:
+          type: string
+          format: date
+        audit_status:
+          type: string
+          enum: [PENDING, APPROVED, REJECTED, EXPIRED]
+
+    VehicleInput:
+      type: object
+      required: [plate_no, model, seats]
+      properties:
+        plate_no:
+          type: string
+          example: 沪A·D12345
+        model:
+          type: string
+          example: 大众 帕萨特 2024
+        seats:
+          type: integer
+          minimum: 4
+          maximum: 7
+        trans_cert_no:
+          type: string
+
+    Vehicle:
+      type: object
+      required: [vehicle_id, plate_no, audit_status]
+      properties:
+        vehicle_id:
+          type: string
+          example: v_31225
+        plate_no:
+          type: string
+        model:
+          type: string
+        seats:
+          type: integer
+        audit_status:
+          type: string
+          enum: [PENDING, APPROVED, REJECTED, EXPIRED]
+
+    Invitation:
+      type: object
+      required: [invite_id, trip_id, expire_at, status, pickup]
+      properties:
+        invite_id:
+          type: string
+          example: inv_20261015_8812
+        trip_id:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, ACCEPTED, REJECTED, EXPIRED, CANCELLED]
+        pickup:
+          type: object
+          required: [lat, lng]
+          properties:
+            lat:
+              type: number
+              format: double
+            lng:
+              type: number
+              format: double
+            address:
+              type: string
+        dest:
+          type: object
+          properties:
+            lat:
+              type: number
+              format: double
+            lng:
+              type: number
+              format: double
+            address:
+              type: string
+        est_fare_amount:
+          $ref: '#/components/schemas/Money'
+        est_trip_distance_m:
+          type: integer
+        passenger_masked:
+          type: string
+          example: 李*女士 138****8000
+        expire_at:
+          type: string
+          format: date-time
+
+    Acceptance:
+      type: object
+      required: [trip_id, invite_id, status, pickup, eta_seconds]
+      properties:
+        trip_id:
+          type: string
+        invite_id:
+          type: string
+        status:
+          type: string
+          example: MATCHED
+        pickup:
+          type: object
+          properties:
+            lat:
+              type: number
+              format: double
+            lng:
+              type: number
+              format: double
+            address:
+              type: string
+        eta_seconds:
+          type: integer
+          example: 420
+        passenger_masked:
+          type: string
+        navi_url:
+          type: string
+          description: 导航链接（由地图服务生成，含接驾点）
+
+    DriverTrip:
+      type: object
+      required: [trip_id, status]
+      properties:
+        trip_id:
+          type: string
+        status:
+          type: string
+          enum: [MATCHED, DRIVER_EN_ROUTE, DRIVER_ARRIVED, RIDING, ENDED, PAID, CANCELLED]
+        origin:
+          type: object
+          properties:
+            lat:
+              type: number
+              format: double
+            lng:
+              type: number
+              format: double
+            address:
+              type: string
+        dest:
+          type: object
+          properties:
+            lat:
+              type: number
+              format: double
+            lng:
+              type: number
+              format: double
+            address:
+              type: string
+        matched_at:
+          type: string
+          format: date-time
+        arrived_at:
+          type: string
+          format: date-time
+          nullable: true
+        boarded_at:
+          type: string
+          format: date-time
+          nullable: true
+        free_wait_until:
+          type: string
+          format: date-time
+          nullable: true
+
+    Metering:
+      type: object
+      required: [distance_m, duration_s, waiting_s, sealed_at]
+      properties:
+        distance_m:
+          type: integer
+          example: 8352
+        duration_s:
+          type: integer
+          example: 1706
+        waiting_s:
+          type: integer
+          example: 155
+        estimate_mode:
+          type: string
+          enum: [TRACK, HAVERSINE]
+          description: TRACK = 轨迹累加（含路网校正）；HAVERSINE = 直线距离 × 1.4 估算
+        sealed_at:
+          type: string
+          format: date-time
+
+    Cancellation:
+      type: object
+      required: [cancellation_id, trip_id, initiator, phase, status]
+      properties:
+        cancellation_id:
+          type: string
+        trip_id:
+          type: string
+        initiator:
+          type: string
+          enum: [RIDER, DRIVER, SYSTEM, OPS]
+        phase:
+          type: string
+          enum: [BEFORE_ACCEPT, AFTER_ACCEPT, AFTER_ARRIVAL, AFTER_RIDING]
+        status:
+          type: string
+          enum: [PENDING, ACCEPTED, REJECTED]
+        fee_amount:
+          $ref: '#/components/schemas/Money'
+        fee_status:
+          type: string
+          enum: [NONE, UNPAID, PAID, WAIVED]
+        driver_cancel_count_today:
+          type: integer
+          description: 司机当日取消次数，用于考核提示
+
+    Error:
+      type: object
+      required: [code, message, trace_id, retryable]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        trace_id:
+          type: string
+        retryable:
+          type: boolean
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              reason:
+                type: string

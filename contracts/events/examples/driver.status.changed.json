@@ -1,0 +1,17 @@
+{
+  "event_id": "evt_01J9Z3N9CD5E7F1G",
+  "event_type": "driver.status.changed.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:31:15+08:00",
+  "producer": "driver-service",
+  "city_code": "SH",
+  "partition_key": "d_77120",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "payload": {
+    "driver_id": "d_77120",
+    "from": "ONLINE",
+    "to": "BUSY",
+    "trip_id": "t_20261015_51bd",
+    "changed_at": "2026-10-15T08:31:15+08:00"
+  }
+}

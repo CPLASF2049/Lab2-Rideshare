@@ -1,0 +1,123 @@
+// 公共类型（金额、坐标、分页、错误、时间）
+// 所有内部接口共享，命名空间 rideshare.common.v1
+syntax = "proto3";
+
+package rideshare.common.v1;
+
+option java_multiple_files = true;
+option java_package = "com.rideshare.common.v1";
+option go_package = "github.com/rideshare/contracts/gen/go/common/v1;commonv1";
+
+import "google/protobuf/timestamp.proto";
+
+// 金额：定点字符串，避免二进制浮点误差。币种当前固定 CNY。
+message Money {
+  string amount = 1;    // 例 "38.60"
+  string currency = 2;  // "CNY"
+}
+
+// 坐标：WGS84
+message GeoPoint {
+  double lat = 1;
+  double lng = 2;
+  string address = 3;
+}
+
+// 费用项：一项可解释的金额
+message FareItem {
+  enum ItemType {
+    ITEM_TYPE_UNSPECIFIED = 0;
+    BASE = 1;
+    DISTANCE = 2;
+    TIME = 3;
+    WAITING = 4;
+    TOLL = 5;
+    SURGE = 6;
+    SERVICE_FEE = 7;
+    DISCOUNT = 8;
+    CANCEL_FEE = 9;
+    WAITING_TIMEOUT = 10;
+  }
+  ItemType item_type = 1;
+  Money amount = 2;
+  string description = 3;
+}
+
+// 分页请求
+message PageRequest {
+  int32 page_size = 1;   // 默认 20，最大 100
+  string page_token = 2; // 不透明游标
+}
+
+// 分页响应
+message PageResponse {
+  string next_page_token = 1; // 空表示没有更多
+}
+
+// 结构化错误详情：gRPC status.details 中携带，便于调用方分支处理
+message ErrorDetail {
+  string code = 1;    // 与 REST 的 code 同义，如 TRIP_STATE_CONFLICT
+  string field = 2;   // 冲突字段，如 status
+  string reason = 3;  // 期望值/实际值说明
+  bool retryable = 4;
+  string trace_id = 5;
+}
+
+// 调用元数据：所有内部写接口都应携带，用于追踪与幂等
+message RequestMeta {
+  string request_id = 1;    // 幂等键（UUID），同一 request_id 重复调用返回首次结果
+  string trace_id = 2;      // 全链路追踪 ID
+  string caller_service = 3;
+  string city_code = 4;     // SH / HZ / NJ
+  google.protobuf.Timestamp deadline_hint = 5;
+}
+
+// 行程状态（与数据库 trip.status 一一对应）
+enum TripStatus {
+  TRIP_STATUS_UNSPECIFIED = 0;
+  REQUESTED = 1;
+  DISPATCHING = 2;
+  MATCHED = 3;
+  DRIVER_EN_ROUTE = 4;
+  DRIVER_ARRIVED = 5;
+  RIDING = 6;
+  ENDED = 7;
+  PAID = 8;
+  CANCELLING = 9;
+  CANCELLED = 10;
+  EXPIRED = 11;
+}
+
+// 取消判责阶段
+enum CancellationPhase {
+  CANCELLATION_PHASE_UNSPECIFIED = 0;
+  BEFORE_ACCEPT = 1;
+  AFTER_ACCEPT = 2;
+  AFTER_ARRIVAL = 3;
+  AFTER_RIDING = 4;
+}
+
+// 取消发起人
+enum CancellationInitiator {
+  CANCELLATION_INITIATOR_UNSPECIFIED = 0;
+  RIDER = 1;
+  DRIVER = 2;
+  SYSTEM = 3;
+  OPS = 4;
+}
+
+// 支付方式 / 渠道
+enum PaymentChannel {
+  PAYMENT_CHANNEL_UNSPECIFIED = 0;
+  AUTO_DEBIT = 1;
+  WECHAT = 2;
+  ALIPAY = 3;
+  UNIONPAY = 4;
+}
+
+// 计量口径：TRACK = 轨迹累加（含路网校正）；HAVERSINE = 直线距离估算
+enum EstimateMode {
+  ESTIMATE_MODE_UNSPECIFIED = 0;
+  TRACK = 1;
+  HAVERSINE = 2;
+}

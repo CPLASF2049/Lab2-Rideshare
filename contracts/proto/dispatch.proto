@@ -1,0 +1,149 @@
+// 派单服务内部接口（rideshare.dispatch.v1）
+// 职责：候选司机筛选与排序、邀请发放与超时重派、接单并发裁决（邀请级 CAS）。
+// 注意：行程状态的最终裁决在 trip-service（TripService/ConfirmMatch），本服务只负责"问"。
+syntax = "proto3";
+
+package rideshare.dispatch.v1;
+
+option java_multiple_files = true;
+option java_package = "com.rideshare.dispatch.v1";
+option go_package = "github.com/rideshare/contracts/gen/go/dispatch/v1;dispatchv1";
+
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+service DispatchService {
+  // 启动撮合（正常由 trip.requested.v1 触发；补偿或运营重派时可显式调用）
+  rpc StartDispatch(StartDispatchRequest) returns (StartDispatchResponse);
+
+  // 司机接受邀请：邀请级 CAS 成功后调用 TripService/ConfirmMatch 权威确认
+  rpc AcceptInvitation(AcceptInvitationRequest) returns (AcceptInvitationResponse);
+
+  // 司机拒绝邀请：立即邀请下一位候选
+  rpc RejectInvitation(RejectInvitationRequest) returns (RejectInvitationResponse);
+
+  // 查询撮合状态（含邀请历史）
+  rpc GetDispatch(GetDispatchRequest) returns (GetDispatchResponse);
+
+  // 终止撮合：作废未响应邀请、释放司机派单锁
+  rpc CancelDispatch(CancelDispatchRequest) returns (CancelDispatchResponse);
+}
+
+// 撮合任务状态
+enum DispatchStatus {
+  DISPATCH_STATUS_UNSPECIFIED = 0;
+  SEARCHING = 1;   // 正在查询候选
+  INVITING = 2;    // 已发出邀请，等待响应
+  FILLED = 3;      // 已成交
+  FAILED = 4;      // 失败（无候选/轮次用尽/位置数据缺失）
+  ABORTED = 5;     // 被取消
+}
+
+// 邀请状态
+enum InvitationStatus {
+  INVITATION_STATUS_UNSPECIFIED = 0;
+  PENDING = 1;
+  ACCEPTED = 2;
+  REJECTED = 3;
+  EXPIRED = 4;
+  CANCELLED = 5;
+}
+
+message Candidate {
+  string driver_id = 1;
+  int32 distance_m = 2;
+  double rating = 3;
+  double accept_rate = 4;
+  double score = 5;                 // 0.6*距离 + 0.25*评分 + 0.15*接单率（归一化后）
+  google.protobuf.Timestamp snapshot_at = 6;
+}
+
+message Invitation {
+  string invite_id = 1;
+  string dispatch_id = 2;
+  string trip_id = 3;
+  string driver_id = 4;
+  int32 round = 5;
+  InvitationStatus status = 6;
+  google.protobuf.Timestamp sent_at = 7;
+  google.protobuf.Timestamp expire_at = 8;   // sent_at + 15s（R-04）
+  google.protobuf.Timestamp responded_at = 9;
+  int32 distance_m = 10;
+}
+
+message Dispatch {
+  string dispatch_id = 1;
+  string trip_id = 2;
+  string city_code = 3;
+  DispatchStatus status = 4;
+  int32 round = 5;                  // 已进行的邀请轮次（1..5）
+  int32 radius_m = 6;               // 首轮 3000，第二轮起 5000
+  int32 candidate_count = 7;
+  google.protobuf.Timestamp started_at = 8;
+  google.protobuf.Timestamp expire_at = 9;
+  repeated Invitation invitations = 10;
+  repeated Candidate candidates = 11;
+}
+
+message StartDispatchRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string trip_id = 2;
+  string city_code = 3;
+  rideshare.common.v1.GeoPoint origin = 4;
+}
+
+message StartDispatchResponse {
+  Dispatch dispatch = 1;
+  bool idempotent_replay = 2;
+}
+
+message AcceptInvitationRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string invite_id = 2;
+  string driver_id = 3;
+  string vehicle_id = 4;
+}
+
+message AcceptInvitationResponse {
+  string trip_id = 1;
+  string invite_id = 2;
+  rideshare.common.v1.TripStatus trip_status = 3;   // MATCHED
+  rideshare.common.v1.GeoPoint pickup = 4;
+  rideshare.common.v1.GeoPoint dest = 5;
+  int32 eta_seconds = 6;
+  string passenger_masked = 7;
+  string navi_url = 8;
+  bool already_accepted = 9;        // 幂等：同一邀请重复接受
+}
+
+message RejectInvitationRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string invite_id = 2;
+  string driver_id = 3;
+  string reason_code = 4;           // TOO_FAR / TRAFFIC / RESTING / VEHICLE_ISSUE / OTHER
+}
+
+message RejectInvitationResponse {
+  InvitationStatus invitation_status = 1;
+  string next_invite_id = 2;        // 已发出下一位邀请时返回，便于客户端提前准备
+}
+
+message GetDispatchRequest {
+  string trip_id = 1;
+}
+
+message GetDispatchResponse {
+  Dispatch dispatch = 1;
+}
+
+message CancelDispatchRequest {
+  rideshare.common.v1.RequestMeta meta = 1;
+  string dispatch_id = 2;
+  string trip_id = 3;
+  string reason = 4;                // TRIP_CANCELLED / TRIP_EXPIRED / OPS_INTERVENE
+}
+
+message CancelDispatchResponse {
+  DispatchStatus dispatch_status = 1;
+  int32 cancelled_invitation_count = 2;
+}

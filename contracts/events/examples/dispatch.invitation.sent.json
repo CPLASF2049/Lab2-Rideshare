@@ -1,0 +1,30 @@
+{
+  "event_id": "evt_01J9Z3J9V2N6R8WQ",
+  "event_type": "dispatch.invitation.sent.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:31:05+08:00",
+  "producer": "dispatch-service",
+  "city_code": "SH",
+  "partition_key": "d_77120",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "payload": {
+    "invite_id": "inv_20261015_8812",
+    "dispatch_id": "dp_20261015_6c4e",
+    "trip_id": "t_20261015_51bd",
+    "driver_id": "d_77120",
+    "round": 1,
+    "pickup": {
+      "lat": 31.2304,
+      "lng": 121.4737,
+      "address": "上海市黄浦区南京东路 100 号"
+    },
+    "dest": {
+      "lat": 31.1979,
+      "lng": 121.3363,
+      "address": "上海市长宁区虹桥路 2550 号"
+    },
+    "est_fare_amount": { "amount": "38.60", "currency": "CNY" },
+    "distance_m": 820,
+    "expire_at": "2026-10-15T08:31:20+08:00"
+  }
+}

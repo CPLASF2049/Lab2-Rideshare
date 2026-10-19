@@ -1,0 +1,16 @@
+{
+  "event_id": "evt_01J9Z4F1B7C3D9E5",
+  "event_type": "trip.boarded.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:41:02+08:00",
+  "producer": "trip-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "payload": {
+    "trip_id": "t_20261015_51bd",
+    "driver_id": "d_77120",
+    "boarded_at": "2026-10-15T08:41:01+08:00",
+    "waiting_s": 156
+  }
+}

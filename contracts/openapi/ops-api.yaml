@@ -1,0 +1,505 @@
+openapi: 3.0.3
+
+info:
+  title: 网约车平台 · 运营端接口（Ops API）
+  version: 1.0.0
+  description: |
+    面向运营后台的 REST 接口，经 `api-gateway` 暴露，由 `ops-service` 提供。
+    角色：`OPS_ADMIN`（可介入与导出）、`OPS_SUPPORT`（只读 + 提交工单）；且只能访问
+    `city_scope` 范围内的城市数据（越权返回 `403 FORBIDDEN`）。
+    所有人工写操作必须携带 `reason`，并自动写入 `audit_log`（只追加）。
+
+servers:
+  - url: https://api.rideshare.example.com
+    description: 生产环境
+
+tags:
+  - name: Record
+    description: 业务记录读模型检索（最终一致，来自事件投影）
+  - name: Intervention
+    description: 人工介入（上车后取消、判责复核）
+  - name: Export
+    description: 异步导出
+  - name: Audit
+    description: 审计日志
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/ops/trips:
+    get:
+      tags: [Record]
+      summary: 检索业务记录
+      operationId: listTripRecords
+      description: |
+        查询 `ops-service` 的读模型（`trip_record_view`）。支持时间范围必填（默认最近 24 小时），
+        单次最多返回 100 条；更大范围请使用导出任务。
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: city_code
+          in: query
+          schema:
+            type: string
+            enum: [SH, HZ, NJ]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [REQUESTED, DISPATCHING, MATCHED, DRIVER_EN_ROUTE, DRIVER_ARRIVED, RIDING, ENDED, PAID, CANCELLING, CANCELLED, EXPIRED]
+        - name: keyword
+          in: query
+          description: 支持 `trip_id`、车牌、乘客/司机手机号后四位
+          schema:
+            type: string
+            maxLength: 32
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: page_token
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 分页记录
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  records:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TripRecord'
+                  next_page_token:
+                    type: string
+                    nullable: true
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/ops/trips/{trip_id}:
+    get:
+      tags: [Record]
+      summary: 查询业务记录详情
+      operationId: getTripRecord
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+      responses:
+        '200':
+          description: 读模型详情（含状态变更历史、派单历史、费用与支付摘要）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TripRecord'
+        '404':
+          description: 记录不存在（TRIP_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/ops/trips/{trip_id}/interventions:
+    post:
+      tags: [Intervention]
+      summary: 人工介入（上车后取消 / 判责复核）
+      operationId: createIntervention
+      description: |
+        唯一的人工写入口。`type=CANCEL_AFTER_RIDING` 时由 `ops-service` 调用
+        `TripService/ApplyIntervention` 终止行程；`type=REVIEW_CANCEL_FEE` / `REVIEW_FARE` 时
+        生成复核结论并触发计价重算或退款。全部操作写审计。
+      parameters:
+        - $ref: '#/components/parameters/TripId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InterventionRequest'
+      responses:
+        '201':
+          description: 工单已创建并处理
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InterventionTicket'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 当前状态不允许该介入（TRIP_STATE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/ops/interventions/{ticket_id}:
+    get:
+      tags: [Intervention]
+      summary: 查询介入工单
+      operationId: getIntervention
+      parameters:
+        - name: ticket_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^tk_[0-9A-Za-z_]+$'
+      responses:
+        '200':
+          description: 工单详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InterventionTicket'
+        '404':
+          description: 工单不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/ops/export-jobs:
+    post:
+      tags: [Export]
+      summary: 创建导出任务
+      operationId: createExportJob
+      description: 异步导出，返回 `202`。单账号并发上限 2，导出文件保留 24 小时。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [format, filter]
+              properties:
+                format:
+                  type: string
+                  enum: [CSV, XLSX]
+                filter:
+                  type: object
+                  properties:
+                    from:
+                      type: string
+                      format: date-time
+                    to:
+                      type: string
+                      format: date-time
+                    city_code:
+                      type: string
+                      enum: [SH, HZ, NJ]
+                    status:
+                      type: string
+      responses:
+        '202':
+          description: 任务已受理
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportJob'
+        '429':
+          description: 并发导出超限（RATE_LIMITED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/ops/export-jobs/{job_id}:
+    get:
+      tags: [Export]
+      summary: 查询导出任务
+      operationId: getExportJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_[0-9A-Za-z_]+$'
+      responses:
+        '200':
+          description: 任务状态与下载地址
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportJob'
+
+  /v1/ops/audit-logs:
+    get:
+      tags: [Audit]
+      summary: 查询审计日志
+      operationId: listAuditLogs
+      parameters:
+        - name: operator_id
+          in: query
+          schema:
+            type: string
+        - name: target_type
+          in: query
+          schema:
+            type: string
+            enum: [TRIP, DRIVER, RIDER, BILL, PAYMENT]
+        - name: target_id
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            maximum: 100
+            default: 20
+        - name: page_token
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 分页审计日志
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditLog'
+                  next_page_token:
+                    type: string
+                    nullable: true
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TripId:
+      name: trip_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^t_[0-9A-Za-z_]+$'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Forbidden:
+      description: 角色或城市范围不足（FORBIDDEN）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: '^-?\d+\.\d{2}$'
+        currency:
+          type: string
+          enum: [CNY]
+
+    TripRecord:
+      type: object
+      required: [trip_id, city_code, status, source_version]
+      properties:
+        trip_id:
+          type: string
+        city_code:
+          type: string
+          enum: [SH, HZ, NJ]
+        status:
+          type: string
+          enum: [REQUESTED, DISPATCHING, MATCHED, DRIVER_EN_ROUTE, DRIVER_ARRIVED, RIDING, ENDED, PAID, CANCELLING, CANCELLED, EXPIRED]
+        rider_masked:
+          type: string
+          example: 138****8000
+        driver_masked:
+          type: string
+          example: 张*明 / 沪A·D12345
+        fare_amount:
+          $ref: '#/components/schemas/Money'
+        cancel_fee_amount:
+          $ref: '#/components/schemas/Money'
+        bill_status:
+          type: string
+          enum: [UNPAID, PAYING, PAID, CLOSED, REFUNDED]
+        requested_at:
+          type: string
+          format: date-time
+        matched_at:
+          type: string
+          format: date-time
+          nullable: true
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+        cancel_phase:
+          type: string
+          enum: [BEFORE_ACCEPT, AFTER_ACCEPT, AFTER_ARRIVAL, AFTER_RIDING]
+        arrival_anomaly:
+          type: boolean
+        source_version:
+          type: integer
+          description: 投影所消费的最后事件版本，便于判断读模型是否滞后
+
+    InterventionRequest:
+      type: object
+      required: [type, decision, reason]
+      properties:
+        type:
+          type: string
+          enum: [CANCEL_AFTER_RIDING, REVIEW_CANCEL_FEE, REVIEW_FARE, DRIVER_PENALTY]
+        decision:
+          type: string
+          enum: [CANCEL, CONTINUE, WAIVE_FEE, CHARGE_FEE, REFUND_DIFF, PENALIZE, NO_ACTION]
+        reason:
+          type: string
+          maxLength: 500
+          description: 必填，写入审计日志
+        evidence_urls:
+          type: array
+          items:
+            type: string
+            format: uri
+
+    InterventionTicket:
+      type: object
+      required: [ticket_id, trip_id, type, status, created_at]
+      properties:
+        ticket_id:
+          type: string
+          example: tk_20261015_6a1f
+        trip_id:
+          type: string
+        type:
+          type: string
+          enum: [CANCEL_AFTER_RIDING, REVIEW_CANCEL_FEE, REVIEW_FARE, DRIVER_PENALTY]
+        decision:
+          type: string
+        status:
+          type: string
+          enum: [OPEN, DONE, REJECTED]
+        result_trip_status:
+          type: string
+          nullable: true
+        result_amount:
+          $ref: '#/components/schemas/Money'
+        operator_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ExportJob:
+      type: object
+      required: [job_id, status, format, created_at]
+      properties:
+        job_id:
+          type: string
+          example: job_20261015_19cd
+        status:
+          type: string
+          enum: [QUEUED, RUNNING, DONE, FAILED, EXPIRED]
+        format:
+          type: string
+          enum: [CSV, XLSX]
+        record_count:
+          type: integer
+        file_url:
+          type: string
+          nullable: true
+        expire_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    AuditLog:
+      type: object
+      required: [audit_id, operator_id, action, target_type, target_id, created_at]
+      properties:
+        audit_id:
+          type: string
+        operator_id:
+          type: string
+        action:
+          type: string
+          example: INTERVENE_CANCEL_AFTER_RIDING
+        target_type:
+          type: string
+          enum: [TRIP, DRIVER, RIDER, BILL, PAYMENT]
+        target_id:
+          type: string
+        reason:
+          type: string
+        before:
+          type: object
+          additionalProperties: true
+        after:
+          type: object
+          additionalProperties: true
+        trace_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      required: [code, message, trace_id, retryable]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        trace_id:
+          type: string
+        retryable:
+          type: boolean

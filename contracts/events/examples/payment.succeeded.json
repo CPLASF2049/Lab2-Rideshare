@@ -1,0 +1,19 @@
+{
+  "event_id": "evt_01J9Z4D2QE6S8U4V",
+  "event_type": "payment.succeeded.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T09:00:12+08:00",
+  "producer": "payment-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "6f1d9a2c3b4e5f60718293a4b5c6d7e8",
+  "payload": {
+    "payment_id": "p_20261015_2f80",
+    "bill_id": "b_20261015_77c2",
+    "trip_id": "t_20261015_51bd",
+    "amount": { "amount": "38.21", "currency": "CNY" },
+    "channel": "WECHAT",
+    "channel_txn_id": "4200002xxx2026101509001",
+    "paid_at": "2026-10-15T09:00:11+08:00"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "event_id": "evt_01J9Z4C8TB5V3X1Z",
+  "event_type": "payment.bill.created.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:59:44+08:00",
+  "producer": "payment-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "9a1c2b3d4e5f60718293a4b5c6d7e8f9",
+  "payload": {
+    "bill_id": "b_20261015_77c2",
+    "trip_id": "t_20261015_51bd",
+    "rider_id": "a_1002381",
+    "bill_type": "TRIP",
+    "items": [
+      { "item_type": "BASE", "amount": { "amount": "13.00", "currency": "CNY" }, "description": "起步价（含 3 公里）" },
+      { "item_type": "DISTANCE", "amount": { "amount": "13.91", "currency": "CNY" }, "description": "里程费 5.35 公里 × 2.60 元/公里" },
+      { "item_type": "TIME", "amount": { "amount": "3.80", "currency": "CNY" }, "description": "时长费 28.4 分钟 × 0.13 元/分钟" },
+      { "item_type": "WAITING", "amount": { "amount": "1.30", "currency": "CNY" }, "description": "等待费 155 秒 × 0.50 元/分钟" },
+      { "item_type": "SURGE", "amount": { "amount": "6.20", "currency": "CNY" }, "description": "动态调价系数 1.2" }
+    ],
+    "total_amount": { "amount": "38.21", "currency": "CNY" },
+    "due_at": "2026-10-15T09:29:40+08:00"
+  }
+}

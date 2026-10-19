@@ -1,0 +1,28 @@
+{
+  "event_id": "evt_01J9Z3H2P7QK4M1T",
+  "event_type": "trip.requested.v1",
+  "event_version": 1,
+  "occurred_at": "2026-10-15T08:31:02+08:00",
+  "producer": "trip-service",
+  "city_code": "SH",
+  "partition_key": "t_20261015_51bd",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "payload": {
+    "trip_id": "t_20261015_51bd",
+    "rider_id": "a_1002381",
+    "city_code": "SH",
+    "origin": {
+      "lat": 31.2304,
+      "lng": 121.4737,
+      "address": "上海市黄浦区南京东路 100 号"
+    },
+    "dest": {
+      "lat": 31.1979,
+      "lng": 121.3363,
+      "address": "上海市长宁区虹桥路 2550 号"
+    },
+    "quote_id": "q_20261015_8f3a",
+    "total_amount": { "amount": "38.60", "currency": "CNY" },
+    "requested_at": "2026-10-15T08:31:02+08:00"
+  }
+}
